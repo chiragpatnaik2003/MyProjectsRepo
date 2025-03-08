@@ -1,122 +1,161 @@
-using System.Collections;
-using System.Collections.Generic;
+﻿using System.Collections;
 using UnityEngine;
-using UnityEngine.XR.ARFoundation;
-using UnityEngine.XR.ARSubsystems;
-using UnityEngine.UI;
 
-[RequireComponent(typeof(ARRaycastManager))]
-public class PlaceObject : MonoBehaviour
+public class PlayerController : MonoBehaviour
 {
-    public GameObject gameObjectToInstantiate;
-    public ARPlaneManager planeManager;
-    public Button togglePlaneButton;
-    public Button rotateButton; // New button reference
-    public Scrollbar sizeScrollbar; // UI Scrollbar reference for scaling
-    public float minScale = 0.1f, maxScale = 2.0f; // Scale range
-    public float rotationDuration = 2.0f; // Duration of the rotation (in seconds)
+    private CharacterController controller;
+    private Vector3 move;
+    public float forwardSpeed;
+    public float maxSpeed;
 
-    private GameObject spawnedObject;
-    private ARRaycastManager raycastManager;
-    private bool isPlaneDetectionActive = true; // Default: Plane detection is on
-    static List<ARRaycastHit> hits = new List<ARRaycastHit>();
+    private int desiredLane = 1;//0:left, 1:middle, 2:right
+    public float laneDistance = 2.5f;//The distance between tow lanes
 
-    private void Awake()
+    public bool isGrounded;
+    public LayerMask groundLayer;
+    public Transform groundCheck;
+
+    public float gravity = -12f;
+    public float jumpHeight = 2;
+    private Vector3 velocity;
+
+    public Animator animator;
+    private bool isSliding = false;
+
+    public float slideDuration = 1.5f;
+
+    bool toggle = false;
+
+    void Start()
     {
-        raycastManager = GetComponent<ARRaycastManager>();
-
-        if (togglePlaneButton != null)
-        {
-            togglePlaneButton.onClick.AddListener(TogglePlaneDetection);
-        }
-
-        if (sizeScrollbar != null)
-        {
-            sizeScrollbar.onValueChanged.AddListener(UpdateObjectScale);
-        }
-
-        if (rotateButton != null)
-        {
-            rotateButton.onClick.AddListener(RotateObjectGradually); // Set the listener for the new button
-        }
+        controller = GetComponent<CharacterController>();
+        Time.timeScale = 1.2f;
     }
 
-    bool TryGetTouchPosition(out Vector2 touchPosition)
+    private void FixedUpdate()
     {
-        if (Input.touchCount > 0)
+        if (!PlayerManager.isGameStarted || PlayerManager.gameOver)
+            return;
+
+        //Increase Speed
+        if (toggle)
         {
-            touchPosition = Input.GetTouch(0).position;
-            return true;
+            toggle = false;
+            if (forwardSpeed < maxSpeed)
+                forwardSpeed += 0.1f * Time.fixedDeltaTime;
         }
-        touchPosition = default;
-        return false;
+        else
+        {
+            toggle = true;
+            if (Time.timeScale < 2f)
+                Time.timeScale += 0.005f * Time.fixedDeltaTime;
+        }
     }
 
     void Update()
     {
-        if (!isPlaneDetectionActive || !TryGetTouchPosition(out Vector2 touchPosition))
+        if (!PlayerManager.isGameStarted || PlayerManager.gameOver)
             return;
 
-        if (raycastManager.Raycast(touchPosition, hits, TrackableType.PlaneWithinPolygon))
-        {
-            var hitPose = hits[0].pose;
+        animator.SetBool("isGameStarted", true);
+        move.z = forwardSpeed;
 
-            if (spawnedObject == null)
+        isGrounded = Physics.CheckSphere(groundCheck.position, 0.17f, groundLayer);
+        animator.SetBool("isGrounded", isGrounded);
+        if (isGrounded && velocity.y < 0)
+            velocity.y = -1f;
+
+        if (isGrounded)
+        {
+            if (SwipeManager.swipeUp)
+                Jump();
+
+            if (SwipeManager.swipeDown && !isSliding)
+                StartCoroutine(Slide());
+        }
+        else
+        {
+            velocity.y += gravity * Time.deltaTime;
+            if (SwipeManager.swipeDown && !isSliding)
             {
-                spawnedObject = Instantiate(gameObjectToInstantiate, hitPose.position, hitPose.rotation);
-                UpdateObjectScale(sizeScrollbar.value); // Set initial scale
-            }
+                StartCoroutine(Slide());
+                velocity.y = -10;
+            }                
+
+        }
+        controller.Move(velocity * Time.deltaTime);
+
+        //Gather the inputs on which lane we should be
+        if (SwipeManager.swipeRight)
+        {
+            desiredLane++;
+            if (desiredLane == 3)
+                desiredLane = 2;
+        }
+        if (SwipeManager.swipeLeft)
+        {
+            desiredLane--;
+            if (desiredLane == -1)
+                desiredLane = 0;
+        }
+
+        //Calculate where we should be in the future
+        Vector3 targetPosition = transform.position.z * transform.forward + transform.position.y * transform.up;
+        if (desiredLane == 0)
+            targetPosition += Vector3.left * laneDistance;
+        else if (desiredLane == 2)
+            targetPosition += Vector3.right * laneDistance;
+
+        //transform.position = targetPosition;
+        if (transform.position != targetPosition)
+        {
+            Vector3 diff = targetPosition - transform.position;
+            Vector3 moveDir = diff.normalized * 30 * Time.deltaTime;
+            if (moveDir.sqrMagnitude < diff.magnitude)
+                controller.Move(moveDir);
             else
-            {
-                spawnedObject.transform.position = hitPose.position;
-            }
+                controller.Move(diff);
+        }
+
+        controller.Move(move * Time.deltaTime);
+    }
+
+    private void Jump()
+    {   
+        StopCoroutine(Slide());
+        animator.SetBool("isSliding", false);
+        animator.SetTrigger("jump");
+        controller.center = Vector3.zero;
+        controller.height = 2;
+        isSliding = false;
+   
+        velocity.y = Mathf.Sqrt(jumpHeight * 2 * -gravity);
+    }
+
+    private void OnControllerColliderHit(ControllerColliderHit hit)
+    {
+        if(hit.transform.tag == "Obstacle")
+        {
+            PlayerManager.gameOver = true;
+            FindObjectOfType<AudioManager>().PlaySound("GameOver");
         }
     }
 
-    public void TogglePlaneDetection()
+    private IEnumerator Slide()
     {
-        isPlaneDetectionActive = !isPlaneDetectionActive;
-        if (planeManager != null)
-        {
-            planeManager.enabled = isPlaneDetectionActive;
-            foreach (var plane in planeManager.trackables)
-            {
-                plane.gameObject.SetActive(isPlaneDetectionActive);
-            }
-        }
-        Debug.Log("Plane Detection: " + (isPlaneDetectionActive ? "Enabled" : "Disabled"));
-    }
+        isSliding = true;
+        animator.SetBool("isSliding", true);
+        yield return new WaitForSeconds(0.25f/ Time.timeScale);
+        controller.center = new Vector3(0, -0.5f, 0);
+        controller.height = 1;
 
-    public void UpdateObjectScale(float value)
-    {
-        if (spawnedObject != null)
-        {
-            float scaleFactor = Mathf.Lerp(minScale, maxScale, value);
-            spawnedObject.transform.localScale = Vector3.one * scaleFactor;
-        }
-    }
+        yield return new WaitForSeconds((slideDuration - 0.25f)/Time.timeScale);
 
-    public void RotateObjectGradually()
-    {
-        if (spawnedObject != null)
-        {
-            StartCoroutine(RotateObjectCoroutine(spawnedObject.transform, 180f, rotationDuration));
-        }
-    }
+        animator.SetBool("isSliding", false);
 
-    private IEnumerator RotateObjectCoroutine(Transform objTransform, float targetAngle, float duration)
-    {
-        Quaternion startRotation = objTransform.rotation;
-        Quaternion endRotation = startRotation * Quaternion.Euler(0, targetAngle, 0);
-        float timeElapsed = 0f;
+        controller.center = Vector3.zero;
+        controller.height = 2;
 
-        while (timeElapsed < duration)
-        {
-            objTransform.rotation = Quaternion.Slerp(startRotation, endRotation, timeElapsed / duration);
-            timeElapsed += Time.deltaTime;
-            yield return null;
-        }
-
-        objTransform.rotation = endRotation; // Ensure it ends exactly at the target angle
+        isSliding = false;
     }
 }
